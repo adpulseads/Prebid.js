@@ -17,12 +17,13 @@ import {auctionManager} from './auctionManager.js';
 import {getCreativeRenderer} from './creativeRenderers.js';
 import {hook} from './hook.js';
 import {fireNativeTrackers} from './native.js';
-import {PbPromise} from './utils/promise.js';
 import adapterManager from './adapterManager.js';
 import {useMetrics} from './utils/perfMetrics.js';
 import {filters} from './targeting.js';
 import {EVENT_TYPE_WIN, parseEventTrackers, TRACKER_METHOD_IMG} from './eventTrackers.js';
 import type {Bid} from "./bidfactory.ts";
+import {yieldsIf} from "./utils/yield.ts";
+import {PbPromise} from "./utils/promise.ts";
 
 const { AD_RENDER_FAILED, AD_RENDER_SUCCEEDED, STALE_RENDER, BID_WON, EXPIRED_RENDER } = EVENTS;
 const { EXCEPTION } = AD_RENDER_FAILED_REASON;
@@ -50,13 +51,18 @@ declare module './events' {
      * the time it was received.
      */
     [EVENTS.EXPIRED_RENDER]: [Bid];
+
+    [EVENTS.BROWSER_INTERVENTION]: [BrowserInterventionData];
   }
 }
 
-export const getBidToRender = hook('sync', function (adId, forRender = true, override = PbPromise.resolve()) {
-  return override
-    .then(bid => bid ?? auctionManager.findBidByAdId(adId))
-    .catch(() => {})
+/**
+ * NOTE: this is here to support PAAPI, which is soon to be removed;
+ *  and should *not* be made asynchronous or it breaks `legacyRender` (unyielding)
+ *  rendering logic
+ */
+export const getBidToRender = hook('sync', function (adId, forRender, cb) {
+  cb(auctionManager.findBidByAdId(adId));
 })
 
 export const markWinningBid = hook('sync', function (bid) {
@@ -127,6 +133,24 @@ export function emitAdRenderSucceeded({ doc, bid, id }) {
   events.emit(AD_RENDER_SUCCEEDED, data);
 }
 
+/**
+ * Data for the BROWSER_INTERVENTION event.
+ */
+type BrowserInterventionData = {
+  bid: Bid;
+  adId: string;
+  intervention: any;
+}
+/**
+ * Emit the BROWSER_INTERVENTION event.
+ * This event is fired when the browser blocks an ad from rendering, typically due to ad blocking software or browser security features.
+ */
+export function emitBrowserIntervention(data: BrowserInterventionData) {
+  const { bid, intervention } = data;
+  adapterManager.callOnInterventionBidder(bid.adapterCode || bid.bidder, bid, intervention);
+  events.emit(EVENTS.BROWSER_INTERVENTION, data);
+}
+
 export function handleCreativeEvent(data, bidResponse) {
   switch (data.event) {
     case EVENTS.AD_RENDER_FAILED:
@@ -142,6 +166,13 @@ export function handleCreativeEvent(data, bidResponse) {
         doc: null,
         bid: bidResponse,
         id: bidResponse.adId
+      });
+      break;
+    case EVENTS.BROWSER_INTERVENTION:
+      emitBrowserIntervention({
+        bid: bidResponse,
+        adId: bidResponse.adId,
+        intervention: data.intervention
       });
       break;
     default:
@@ -304,7 +335,12 @@ export function renderIfDeferred(bidResponse) {
   }
 }
 
-export function renderAdDirect(doc, adId, options) {
+let legacyRender = false;
+config.getConfig('auctionOptions', (opts) => {
+  legacyRender = opts.auctionOptions?.legacyRender ?? false
+});
+
+export const renderAdDirect = yieldsIf(() => !legacyRender, function renderAdDirect(doc, adId, options) {
   let bid;
   function fail(reason, message) {
     emitAdRenderFail(Object.assign({id: adId, bid}, {reason, message}));
@@ -323,17 +359,30 @@ export function renderAdDirect(doc, adId, options) {
     }
   }
   const messageHandler = creativeMessageHandler({resizeFn});
+
+  function waitForDocumentReady(doc) {
+    return new PbPromise<void>((resolve) => {
+      if (doc.readyState === 'loading') {
+        doc.addEventListener('DOMContentLoaded', resolve);
+      } else {
+        resolve();
+      }
+    })
+  }
+
   function renderFn(adData) {
-    if (adData.ad) {
+    if (adData.ad && legacyRender) {
       doc.write(adData.ad);
       doc.close();
       emitAdRenderSucceeded({doc, bid, id: bid.adId});
     } else {
-      getCreativeRenderer(bid)
-        .then(render => render(adData, {
-          sendMessage: (type, data) => messageHandler(type, data, bid),
-          mkFrame: createIframe,
-        }, doc.defaultView))
+      PbPromise.all([
+        getCreativeRenderer(bid),
+        waitForDocumentReady(doc)
+      ]).then(([render]) => render(adData, {
+        sendMessage: (type, data) => messageHandler(type, data, bid),
+        mkFrame: createIframe,
+      }, doc.defaultView))
         .then(
           () => emitAdRenderSucceeded({doc, bid, id: bid.adId}),
           (e) => {
@@ -350,7 +399,7 @@ export function renderAdDirect(doc, adId, options) {
     if (!adId || !doc) {
       fail(AD_RENDER_FAILED_REASON.MISSING_DOC_OR_ADID, `missing ${adId ? 'doc' : 'adId'}`);
     } else {
-      getBidToRender(adId).then(bidResponse => {
+      getBidToRender(adId, true, (bidResponse) => {
         bid = bidResponse;
         handleRender({renderFn, resizeFn, adId, options: {clickUrl: options?.clickThrough}, bidResponse, doc});
       });
@@ -358,7 +407,7 @@ export function renderAdDirect(doc, adId, options) {
   } catch (e) {
     fail(EXCEPTION, e.message);
   }
-}
+});
 
 /**
  * Insert an invisible, named iframe that can be used by creatives to locate the window Prebid is running in
