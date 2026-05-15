@@ -1,4 +1,4 @@
-# Repo guidelines for Codex
+# Ad Pulse Prebid.js Fork — Agent Instructions
 
 This file contains instructions for the Codex agent and its friends when working on tasks in this repository.
 
@@ -47,4 +47,17 @@ This file contains instructions for the Codex agent and its friends when working
 - Do not invoke commands that rebuild all modules when only a subset are changed.
 
 ## Additional context
-- for additional context on repo history, consult https://github.com/prebid/github-activity-db/blob/main/CLAUDE.md on how to download and access repo history in a database you can search locally.
+- for additional context on repo history, consult https://github.com/prebid/github-activity-db/blob/main/AGENTS.md on how to download and access repo history in a database you can search locally.
+
+## Agent Role
+
+This repository is assigned to the **Frontend Sub-Agent (Role C)** in the Ad Pulse three-role orchestration hierarchy. See root [AGENTS.md](../AGENTS.md) and [architecture-design.md](../architecture-design.md).
+
+## LightRAG Context
+
+- Search Collection: `prebid-js_voyage_code_3`
+- **Always query LightRAG before generating code** to understand existing custom modules, bidder adapters, and Prebid.js fork conventions.
+
+## Skills & Capabilities
+
+See [./SKILLS.md](./SKILLS.md) for tool preferences, agent skill activations, and limitations.
